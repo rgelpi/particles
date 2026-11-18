@@ -18,4 +18,4 @@ def halton(N, d):
     return safe_generate(N, d, qmc.Halton)
 
 def latin(N, d):
-    return safe_generate(N, d, qmc.LatinHybercube)
+    return safe_generate(N, d, qmc.LatinHypercube)

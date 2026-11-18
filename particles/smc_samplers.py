@@ -197,13 +197,17 @@ J. R. Stat. Soc. Ser. B. Stat. Methodol. 84, 1 (2022), 114–148,
 
 import copy as cp
 import itertools
+import warnings
+from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 from numpy import random
 from scipy import linalg, optimize, stats
 
 import particles
+from particles import distributions as dists
 from particles import resampling as rs
+from particles._typing import _require
 from particles.collectors import Collector
 from particles.state_space_models import Bootstrap
 from particles.variance_mcmc import MCMC_variance
@@ -231,7 +235,7 @@ class StaticModel:
     See doc of `__init__` for more details on the arguments
     """
 
-    def __init__(self, data=None, prior=None):
+    def __init__(self, data: Any | None = None, prior: dists.ProbDist | None = None):
         """
         Parameters
         ----------
@@ -297,17 +301,39 @@ class StaticModel:
         l: float numpy.ndarray
             the N log-likelihood values
         """
-        return self.prior.logpdf(theta) + self.loglik(theta, t)
+        prior = _require(self.prior, "prior")
+        return prior.logpdf(theta) + self.loglik(theta, t)
 
 
 class TemperingBridge(StaticModel):
+    """Bridge to a full target density; time indices are ignored with a warning."""
+
+    # A later mix-in may supply this hook; preserve runtime method lookup.
+    if TYPE_CHECKING:
+        def logtarget(self, theta) -> Any: ...
+
     def __init__(self, base_dist=None):
         self.prior = base_dist
 
-    def loglik(self, theta):
-        return self.logtarget(theta) - self.prior.logpdf(theta)
+    def loglik(self, theta, t=None):
+        if t is not None:
+            warnings.warn(
+                "TemperingBridge does not support time-indexed evaluation; "
+                "t is ignored and the full target is used.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        prior = _require(self.prior, "prior")
+        return self.logtarget(theta) - prior.logpdf(theta)
 
-    def logpost(self, theta):
+    def logpost(self, theta, t=None):
+        if t is not None:
+            warnings.warn(
+                "TemperingBridge does not support time-indexed evaluation; "
+                "t is ignored and the full target is used.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         return self.logtarget(theta)
 
 
@@ -374,8 +400,11 @@ class FancyList:
         Same syntax and functionality as numpy.copyto
 
         """
+        if not self.data:
+            return
+        mask = _require(where, "where")
         for n, _ in enumerate(self.data):
-            if where[n]:
+            if mask[n]:
                 self.data[n] = src.data[n]  # not a copy
 
 
@@ -420,6 +449,13 @@ class ThetaParticles:
         # returns a new instance that contains particles 3, 5 and 10 (twice)
 
     """
+
+    # Fields are populated dynamically from **fields; these are the common ones.
+    theta: np.ndarray
+    lpost: np.ndarray
+    lprior: np.ndarray
+    llik: np.ndarray
+    x: Any
 
     def __init__(self, shared=None, **fields):
         self.shared = {} if shared is None else shared
@@ -477,7 +513,8 @@ class ThetaParticles:
         for k, v in self.dict_fields.items():
             if isinstance(v, np.ndarray):
                 # takes care of arrays with ndims > 1
-                wh = np.expand_dims(where, tuple(range(1, v.ndim)))
+                mask = _require(where, "where")
+                wh = np.expand_dims(mask, tuple(range(1, v.ndim)))
                 np.copyto(v, getattr(src, k), where=wh)
             else:
                 v.copyto(getattr(src, k), where=where)
@@ -521,8 +558,10 @@ class ImportanceSampler:
 
     """
 
-    def __init__(self, model=None, proposal=None):
-        self.proposal = model.prior if proposal is None else proposal
+    def __init__(
+        self, model: StaticModel | None = None, proposal: dists.ProbDist | None = None
+    ):
+        self.proposal = _require(model, "model").prior if proposal is None else proposal
         self.model = model
 
     def run(self, N=100):
@@ -542,10 +581,12 @@ class ImportanceSampler:
         log_norm_cst: float
             Estimate of the log normalising constant of the target
         """
-        th = self.proposal.rvs(size=N)
+        proposal = _require(self.proposal, "proposal")
+        th = proposal.rvs(size=N)
         self.X = ThetaParticles(theta=th)
-        self.X.lpost = self.model.logpost(th)
-        lw = self.X.lpost - self.proposal.logpdf(th)
+        model = _require(self.model, "model")
+        self.X.lpost = model.logpost(th)
+        lw = self.X.lpost - proposal.logpdf(th)
         self.wgts = rs.Weights(lw=lw)
         self.log_norm_cst = self.wgts.log_mean
 
@@ -580,7 +621,7 @@ class ArrayMCMC:
         """
         pass
 
-    def step(self, x, target=None):
+    def step(self, x, target: Callable[..., Any] | None = None):
         """
         Parameters
         ----------
@@ -603,10 +644,10 @@ class ArrayMetropolis(ArrayMCMC):
     def proposal(self, x, xprop):
         raise NotImplementedError
 
-    def step(self, x, target=None):
+    def step(self, x, target: Callable[..., Any] | None = None):
         xprop = x.__class__(theta=np.empty_like(x.theta))
         delta_lp = self.proposal(x, xprop)
-        target(xprop)
+        _require(target, "target")(xprop)
         lp_acc = xprop.lpost - x.lpost + delta_lp
         pb_acc = np.exp(np.clip(lp_acc, None, 0.0))
         mean_acc = np.mean(pb_acc)
@@ -730,7 +771,11 @@ class FKSMCsampler(particles.FeynmanKac):
 
     """
 
-    def __init__(self, model=None, wastefree=True, len_chain=10, move=None):
+    if TYPE_CHECKING:
+        def _M0(self, N: int) -> ThetaParticles: ...
+
+    def __init__(self, model: Any | None = None, wastefree=True, len_chain=10, move=None):
+        # SMC2 also uses this interface with itself as the model.
         self.model = model
         self.wastefree = wastefree
         self.len_chain = len_chain
@@ -744,10 +789,10 @@ class FKSMCsampler(particles.FeynmanKac):
 
     @property
     def T(self):
-        return self.model.T
+        return _require(self.model, "model").T
 
-    def default_moments(self, W, x):
-        return rs.wmean_and_var_str_array(W, x.theta)
+    def default_moments(self, W, X):
+        return rs.wmean_and_var_str_array(W, X.theta)
 
     def summary_format(self, smc):
         if smc.rs_flag:
@@ -774,18 +819,22 @@ class FKSMCsampler(particles.FeynmanKac):
 
 class IBIS(FKSMCsampler):
     def logG(self, t, xp, x):
-        lpyt = self.model.logpyt(x.theta, t)
+        model = _require(self.model, "model")
+        lpyt = model.logpyt(x.theta, t)
         x.lpost += lpyt
         return lpyt
 
     def current_target(self, t):
         def func(x):
-            x.lpost = self.model.logpost(x.theta, t=t)
+            model = _require(self.model, "model")
+            x.lpost = model.logpost(x.theta, t=t)
 
         return func
 
     def _M0(self, N):
-        x0 = ThetaParticles(theta=self.model.prior.rvs(size=N))
+        model = _require(self.model, "model")
+        prior = _require(model.prior, "prior")
+        x0 = ThetaParticles(theta=prior.rvs(size=N))
         self.current_target(-1)(x0)
         return x0
 
@@ -814,8 +863,8 @@ class Tempering(FKSMCsampler):
         super().__init__(
             model=model, wastefree=wastefree, len_chain=len_chain, move=move
         )
-        self.exponents = exponents
-        self.deltas = np.diff(exponents, prepend=0.0)
+        self.exponents = _require(exponents, "exponents")
+        self.deltas = np.diff(self.exponents, prepend=0.0)
 
     @property
     def T(self):
@@ -846,8 +895,10 @@ class Tempering(FKSMCsampler):
 
     def current_target(self, epn):
         def func(x):
-            x.lprior = self.model.prior.logpdf(x.theta)
-            x.llik = self.model.loglik(x.theta)
+            model = _require(self.model, "model")
+            prior = _require(model.prior, "prior")
+            x.lprior = prior.logpdf(x.theta)
+            x.llik = model.loglik(x.theta)
             if epn > 0.0:
                 x.lpost = x.lprior + epn * x.llik
             else:  # avoid having 0 x Nan
@@ -856,7 +907,9 @@ class Tempering(FKSMCsampler):
         return func
 
     def _M0(self, N):
-        x0 = ThetaParticles(theta=self.model.prior.rvs(size=N))
+        model = _require(self.model, "model")
+        prior = _require(model.prior, "prior")
+        x0 = ThetaParticles(theta=prior.rvs(size=N))
         x0.shared["exponents"] = [0.0]
         x0.shared["path_sampling"] = [0.0]
         self.current_target(0.0)(x0)
@@ -1005,6 +1058,7 @@ class Var_phi(Collector):
     how collectors work.
     """
 
+    phi: Callable[..., Any] | None
     signature = {"phi": None}
 
     def fetch(self, smc):
@@ -1080,7 +1134,7 @@ class SMC2(FKSMCsampler):
     def __init__(
         self,
         ssm_cls=None,
-        prior=None,
+        prior: dists.ProbDist | None = None,
         data=None,
         smc_options=None,
         fk_cls=None,
@@ -1092,7 +1146,7 @@ class SMC2(FKSMCsampler):
     ):
         super().__init__(self, wastefree=wastefree, len_chain=len_chain, move=move)
         # switch off collection of basic summaries (takes too much memory)
-        self.smc_options = {"collect": "off"}
+        self.smc_options: dict[str, Any] = {"collect": "off"}
         if smc_options is not None:
             self.smc_options.update(smc_options)
         self.fk_cls = Bootstrap if fk_cls is None else fk_cls
@@ -1118,6 +1172,7 @@ class SMC2(FKSMCsampler):
             ar = 1.0
         low_ar = ar < self.ar_to_increase_Nx
         we_increase_Nx = low_ar & x.shared.get("rs_flag", False)
+        liw_Nx = 0.0  # Only used when an exchange step takes place.
         if we_increase_Nx:
             liw_Nx = self.exchange_step(x, t, 2 * x.pfs[0].N)
         # compute (estimate of) log p(y_t|\theta,y_{0:t-1})
@@ -1134,8 +1189,9 @@ class SMC2(FKSMCsampler):
             return lpyt
 
     def alg_instance(self, theta, N):
+        ssm_cls = _require(self.ssm_cls, "ssm_cls")
         return particles.SMC(
-            fk=self.fk_cls(ssm=self.ssm_cls(**theta), data=self.data),
+            fk=self.fk_cls(ssm=ssm_cls(**theta), data=self.data),
             N=N,
             **self.smc_options,
         )
@@ -1145,7 +1201,8 @@ class SMC2(FKSMCsampler):
             x.pfs = FancyList(
                 [self.alg_instance(rec_to_dict(theta), Nx) for theta in x.theta]
             )
-            x.lpost = self.prior.logpdf(x.theta)
+            prior = _require(self.prior, "prior")
+            x.lpost = prior.logpdf(x.theta)
             if t >= 0:
                 is_finite = np.isfinite(x.lpost)
                 for m, pf in enumerate(x.pfs):
@@ -1157,8 +1214,9 @@ class SMC2(FKSMCsampler):
         return func
 
     def _M0(self, N):
+        prior = _require(self.prior, "prior")
         x0 = ThetaParticles(
-            theta=self.prior.rvs(size=N), shared={"Nxs": [self.init_Nx]}
+            theta=prior.rvs(size=N), shared={"Nxs": [self.init_Nx]}
         )
         self.current_target(-1, self.init_Nx)(x0)
         return x0

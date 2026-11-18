@@ -41,6 +41,8 @@ References
 
 """
 
+from typing import Any, cast, overload
+
 import numpy as np
 import scipy as sp
 from numpy import random
@@ -49,6 +51,7 @@ from sklearn.linear_model import LogisticRegression
 
 from particles import distributions as dists
 from particles import smc_samplers as ssps
+from particles._typing import ScalarOrArray, _require
 
 
 def all_binary_words(p):
@@ -134,9 +137,11 @@ class NestedLogistic(dists.DiscreteDist):
                     if np.abs(corr) > corr_thresh:
                         preds.append(j)
                 if preds: 
-                    reg = LogisticRegression(penalty=None)
+                    # Inferred sklearn types omit the supported None penalty.
+                    reg = LogisticRegression(penalty=cast(Any, None))
                     reg.fit(x[:, preds], x[:, i], sample_weight=W)
-                    coeffs[i, i] = reg.intercept_[0] # Old: coeffs[i, i] = reg.intercept_
+                    # After binary classification fit, intercept_ is an array.
+                    coeffs[i, i] = cast(np.ndarray, reg.intercept_)[0]
                     coeffs[i, preds] = reg.coef_[0] # Old: coeffs[i, preds] = reg.coef_
                 else:
                     coeffs[i, i] = logit(ph[i])
@@ -180,6 +185,19 @@ def chol_and_friends(gamma, xtx, xty, vm2):
     return len_gam, ldet, wtw
 
 
+_MISSING = object()
+
+
+def _resolve_gamma(theta: Any, gamma: Any) -> Any:
+    if theta is _MISSING:
+        if gamma is _MISSING:
+            raise TypeError("loglik() requires 'theta' or its alias 'gamma'")
+        return gamma
+    if gamma is not _MISSING:
+        raise TypeError("loglik() accepts either 'theta' or 'gamma', not both")
+    return theta
+
+
 class VariableSelection(ssps.StaticModel):
     """Meta-class for variable selection.
 
@@ -190,10 +208,16 @@ class VariableSelection(ssps.StaticModel):
     * the likelihood is typically the marginal likelihood of gamma, where
       the coefficient parameters have been integrated out.
 
+    The generic model argument ``theta`` contains these inclusion indicators.
+    ``loglik`` also accepts ``gamma=`` as a keyword alias; supplying both names
+    raises ``TypeError``.
+
     """
 
+    iv2: ScalarOrArray
+
     def __init__(self, data=None):
-        self.x, self.y = data
+        self.x, self.y = _require(data, "data")
         self.n, self.p = self.x.shape
         self.xtx = self.x.T @ self.x
         self.yty = np.sum(self.y ** 2)
@@ -224,7 +248,17 @@ class BIC(VariableSelection):
         self.coef_in_log = self.yty
         self.iv2 = 0.0
 
-    def loglik(self, gamma, t=None):
+    @overload
+    def loglik(self, theta: Any, t: Any = None) -> np.ndarray: ...
+
+    @overload
+    def loglik(self, *, gamma: Any, t: Any = None) -> np.ndarray: ...
+
+    def loglik(
+        self, theta: Any = _MISSING, t=None, *, gamma: Any = _MISSING
+    ) -> np.ndarray:
+        """Evaluate inclusion vectors using theta or its gamma keyword alias."""
+        gamma = _resolve_gamma(theta, gamma)
         len_gam, ldet, wtw = self.chol_intermediate(gamma)
         lp = -(self.coef_len * len_gam + self.coef_log * np.log(self.coef_in_log - wtw))
         return lp
@@ -255,7 +289,17 @@ class BayesianVS(VariableSelection):
         self.coef_log = 0.5 * (self.nu + self.n)
         self.coef_in_log = self.nu * self.lamb + self.yty
 
-    def loglik(self, gamma, t=None):
+    @overload
+    def loglik(self, theta: Any, t: Any = None) -> np.ndarray: ...
+
+    @overload
+    def loglik(self, *, gamma: Any, t: Any = None) -> np.ndarray: ...
+
+    def loglik(
+        self, theta: Any = _MISSING, t=None, *, gamma: Any = _MISSING
+    ) -> np.ndarray:
+        """Evaluate inclusion vectors using theta or its gamma keyword alias."""
+        gamma = _resolve_gamma(theta, gamma)
         len_gam, ldet, wtw = self.chol_intermediate(gamma)
         lp = -(
             self.coef_len * len_gam
@@ -284,7 +328,17 @@ class BayesianVS_gprior(BayesianVS):
         self.coef_in_log = self.nu * self.lamb + self.yty
         self.gogp1 = self.g / (self.g + 1.0)
 
-    def loglik(self, gamma, t=None):
+    @overload
+    def loglik(self, theta: Any, t: Any = None) -> np.ndarray: ...
+
+    @overload
+    def loglik(self, *, gamma: Any, t: Any = None) -> np.ndarray: ...
+
+    def loglik(
+        self, theta: Any = _MISSING, t=None, *, gamma: Any = _MISSING
+    ) -> np.ndarray:
+        """Evaluate inclusion vectors using theta or its gamma keyword alias."""
+        gamma = _resolve_gamma(theta, gamma)
         len_gam, _, wtw = self.chol_intermediate(gamma)
         lp = -(
             self.coef_len * len_gam

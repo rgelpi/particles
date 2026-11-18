@@ -102,6 +102,7 @@ from scipy import linalg, special, stats
 from particles import resampling as rs
 from particles import smc_samplers as ssps
 from particles import utils
+from particles._typing import _require
 
 
 def unif_minus_one(N, m):
@@ -181,15 +182,17 @@ class NestedSampling:
        the mutate method, which mutates the selected point through MCMC steps.
     """
 
-    def __init__(self, model=None, N=100, eps=1e-8):
+    def __init__(self, model: ssps.StaticModel | None = None, N=100, eps=1e-8):
         self.model = model
         self.N = N
         self.eps = eps
 
     def setup(self):
-        th = self.model.prior.rvs(size=self.N)
-        lp = self.model.prior.logpdf(th)
-        ll = self.model.loglik(th)
+        model = _require(self.model, "model")
+        prior = _require(model.prior, "prior")
+        th = prior.rvs(size=self.N)
+        lp = prior.logpdf(th)
+        ll = model.loglik(th)
         self.x = ssps.ThetaParticles(theta=th, lprior=lp, llik=ll)
 
     def mutate(self, n, m):
@@ -253,8 +256,10 @@ class Nested_RWmoves(NestedSampling):
         self.nacc = 0
 
     def update_xp_fields(self):
-        self.xp.lprior = self.model.prior.logpdf(self.xp.theta)
-        self.xp.llik = self.model.loglik(self.xp.theta)
+        model = _require(self.model, "model")
+        prior = _require(model.prior, "prior")
+        self.xp.lprior = prior.logpdf(self.xp.theta)
+        self.xp.llik = model.loglik(self.xp.theta)
 
     def mutate(self, n, m):
         arr = ssps.view_2d_array(self.x.theta)
@@ -352,8 +357,10 @@ class NestedSamplingSMC(ssps.FKSMCsampler):
 
     def current_target(self, lt):
         def func(x):
-            x.lprior = self.model.prior.logpdf(x.theta)
-            x.llik = self.model.loglik(x.theta)
+            model = _require(self.model, "model")
+            prior = _require(model.prior, "prior")
+            x.lprior = prior.logpdf(x.theta)
+            x.llik = model.loglik(x.theta)
             if lt == -np.inf:
                 x.lpost = x.lprior.copy()
             else:
@@ -363,7 +370,9 @@ class NestedSamplingSMC(ssps.FKSMCsampler):
         return func
 
     def _M0(self, N):
-        x0 = ssps.ThetaParticles(theta=self.model.prior.rvs(size=N))
+        model = _require(self.model, "model")
+        prior = _require(model.prior, "prior")
+        x0 = ssps.ThetaParticles(theta=prior.rvs(size=N))
         x0.shared["lts"] = [-np.inf]
         x0.shared["log_evid"] = [-np.inf]
         self.current_target(-np.inf)(x0)

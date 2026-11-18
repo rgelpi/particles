@@ -206,6 +206,8 @@ time by the ``fetch`` method.
 """
 
 
+from typing import TYPE_CHECKING, Any, Callable
+
 import numpy as np
 from numpy import random
 
@@ -244,7 +246,12 @@ class Collector:
       constructor, by default, an empty dict)
     """
 
-    signature = {}
+    signature: dict[str, Any] = {}
+
+    # Some collectors obtain fetch from a mix-in after Collector in the MRO.
+    # Declaring the hook only for checking preserves that method lookup.
+    if TYPE_CHECKING:
+        def fetch(self, smc) -> Any: ...
 
     @property
     def summary_name(self):
@@ -276,7 +283,8 @@ class Collector:
 
 
 class ESSs(Collector):
-    summary_name = "ESSs"
+    # A string override is part of the documented collector interface.
+    summary_name = "ESSs"  # pyright: ignore[reportIncompatibleMethodOverride, reportAssignmentType]
 
     def fetch(self, smc):
         return smc.wgts.ESS
@@ -310,6 +318,7 @@ class Moments(Collector):
     is used (mean and variance of the particles, see ``core.FeynmanKac``).
     """
 
+    mom_func: Callable[..., Any] | None
     signature = {"mom_func": None}
 
     def fetch(self, smc):
@@ -328,6 +337,7 @@ class Fixed_lag_smooth(Collector):
     with k an int, see module ``smoothing``).
     """
 
+    phi: Callable[..., Any] | None
     signature = {"phi": None}
 
     def test_func(self, x):
@@ -408,6 +418,8 @@ class Paris(Collector, OnlineSmootherMixin):
     algorithms, arXiv:2207.00976
     """
 
+    Nparis: int
+    max_trials: float | None
     signature = {"Nparis": 2, "max_trials": None}
 
     def __init__(self, **kwargs):

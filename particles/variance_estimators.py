@@ -84,6 +84,8 @@ References
 """
 
 
+from typing import Any, Callable
+
 import numpy as np
 from numba import jit
 
@@ -156,6 +158,7 @@ class Var(col.Collector, VarColMixin):
        the test function (default: identity function)
     """
 
+    phi: Callable[..., Any] | None
     signature = {"phi": None}
 
     def test_func(self, x):

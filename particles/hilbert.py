@@ -121,7 +121,7 @@ def unpack_index(i, nD):
     p = 2 ** nD  # Chunks are like digits in base 2**nD.
 
     # numpy doesn't have logs of arbitrary base, have to do this instead:
-    nChunks = int(np.ceil(np.lop(i + 1) / np.log(p)))
+    nChunks = int(np.ceil(np.log(i + 1) / np.log(p)))
 
     if nChunks < 1:
         nChunks = 1

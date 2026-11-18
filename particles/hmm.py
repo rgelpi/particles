@@ -97,11 +97,14 @@ then $Y_{0:1}$, and so on). This is expensive, of course (cost is O(T^2)).
 """
 
 
+from typing import Any
+
 import numpy as np
 
 from particles import distributions as dists
 from particles import resampling as rs
 from particles import state_space_models as ssms
+from particles._typing import _require
 
 
 class HMM(ssms.StateSpaceModel):
@@ -111,6 +114,8 @@ class HMM(ssms.StateSpaceModel):
     See module hmm for more information (and Chapter 6 of the book).
     """
 
+    init_dist: np.ndarray
+    trans_mat: np.ndarray
     default_params = {"init_dist": None, "trans_mat": None}
 
     def __init__(self, **kwargs):
@@ -134,6 +139,8 @@ class HMM(ssms.StateSpaceModel):
 class GaussianHMM(HMM):
     r"""Gaussian HMM: :math:`Y_t|X_t=k \sim N(\mu_k, \sigma_k^2)`
     """
+    mus: np.ndarray
+    sigmas: np.ndarray
     default_params = {'mus': None, 'sigmas': None}
     default_params.update(HMM.default_params)
 
@@ -170,7 +177,7 @@ class BaumWelch:
     t).
     """
 
-    def __init__(self, hmm=None, data=None):
+    def __init__(self, hmm: HMM | None = None, data: Any | None = None):
         self.hmm = hmm
         self.data = data
         self.pred, self.filt, self.logpyt, self.logft = [], [], [], []
@@ -180,14 +187,16 @@ class BaumWelch:
         return len(self.filt)
 
     def pred_step(self):
+        hmm = _require(self.hmm, "hmm")
         if self.filt:
-            p = np.matmul(self.filt[-1], self.hmm.trans_mat)
+            p = np.matmul(self.filt[-1], hmm.trans_mat)
         else:
-            p = self.hmm.init_dist
+            p = hmm.init_dist
         self.pred.append(p)
 
     def filt_step(self, t, yt):
-        emis = self.hmm.PY(t, None, np.arange(self.hmm.dim)).logpdf(yt)
+        hmm = _require(self.hmm, "hmm")
+        emis = hmm.PY(t, None, np.arange(hmm.dim)).logpdf(yt)
         lp = np.log(self.pred[-1]) + emis
         logpyt = rs.log_sum_exp(lp)
         f = np.exp(lp - logpyt)
@@ -196,8 +205,9 @@ class BaumWelch:
         self.filt.append(f)
 
     def __next__(self):
+        data = _require(self.data, "data")
         try:
-            yt = self.data[self.t]
+            yt = data[self.t]
         except IndexError:
             raise StopIteration
         self.pred_step()
@@ -233,11 +243,12 @@ class BaumWelch:
         if not self.filt:
             self.forward()
         self.smth = [self.filt[-1]]
-        log_trans = np.log(self.hmm.trans_mat)
-        ctg = np.zeros(self.hmm.dim)  # cost to go (log-lik of y_{t+1:T} given x_t=k)
+        hmm = _require(self.hmm, "hmm")
+        log_trans = np.log(hmm.trans_mat)
+        ctg = np.zeros(hmm.dim)  # cost to go (log-lik of y_{t+1:T} given x_t=k)
         for filt, next_ft in reversed(list(zip(self.filt[:-1], self.logft[1:]))):
-            new_ctg = np.empty(self.hmm.dim)
-            for k in range(self.hmm.dim):
+            new_ctg = np.empty(hmm.dim)
+            for k in range(hmm.dim):
                 new_ctg[k] = rs.log_sum_exp(log_trans[k, :] + next_ft + ctg)
             ctg = new_ctg
             smth = rs.exp_and_normalise(np.log(filt) + ctg)
@@ -260,7 +271,8 @@ class BaumWelch:
             self.forward()
         paths = np.empty((len(self.filt), N), np.int64)
         paths[-1, :] = rs.multinomial(self.filt[-1], M=N)
-        log_trans = np.log(self.hmm.trans_mat)
+        hmm = _require(self.hmm, "hmm")
+        log_trans = np.log(hmm.trans_mat)
         for t, f in reversed(list(enumerate(self.filt[:-1]))):
             for n in range(N):
                 probs = rs.exp_and_normalise(log_trans[:, paths[t + 1, n]] + np.log(f))

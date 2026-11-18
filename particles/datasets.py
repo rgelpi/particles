@@ -46,6 +46,7 @@ adds an intercept) predictors/features for a regression or classification task.
 
 import collections
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -61,7 +62,8 @@ class Dataset:
     point to the same object.
     """
 
-    load_opts = {"delimiter": ","}
+    file_name: str
+    load_opts: dict[str, Any] = {"delimiter": ","}
 
     def preprocess(self, raw_data, **kwargs):
         return raw_data
@@ -131,7 +133,7 @@ class LogReturnsDataset(Dataset):
     taking the log, and multiplying by 100 (to get per-cent points).
     """
 
-    def preprocess(self, raw_data):
+    def preprocess(self, raw_data, **kwargs):
         """compute log-returns."""
         return 100.0 * np.diff(np.log(raw_data), axis=0)
 
@@ -196,7 +198,7 @@ class RegressionDataset(Dataset):
     element is a 2D (resp. 1D) numpy array.
     """
 
-    def preprocess(self, raw_data):
+    def preprocess(self, raw_data, **kwargs):
         response = raw_data[:, -1]
         preds = prepare_predictors(raw_data[:, :-1])
         return preds, response
@@ -285,7 +287,7 @@ class BinaryRegDataset(Dataset):
 
     """
 
-    def preprocess(self, raw_data, return_y=False):
+    def preprocess(self, raw_data, return_y=False, **kwargs):
         response = 2 * raw_data[:, -1] - 1  # 0/1 -> -1/1
         preds = prepare_predictors(raw_data[:, :-1])
         if return_y:
@@ -375,6 +377,7 @@ class Sonar(BinaryRegDataset):
 
     """
 
+    @staticmethod
     def convert_last_col(x):
         if x == "R":
             return 1.0

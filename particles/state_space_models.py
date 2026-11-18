@@ -157,10 +157,13 @@ Class                     Comments
 """
 
 
+from typing import Any, ClassVar
+
 import numpy as np
 
 import particles
 from particles import distributions as dists
+from particles._typing import ScalarOrArray, _require
 
 err_msg_missing_cst = """
     State-space model %s is missing method upper_bound_log_pt, which provides
@@ -210,6 +213,8 @@ class StateSpaceModel:
 
     """
 
+    default_params: ClassVar[dict[str, Any]]
+
     def __init__(self, **kwargs):
         if hasattr(self, "default_params"):
             self.__dict__.update(self.default_params)
@@ -229,22 +234,22 @@ class StateSpaceModel:
             shape.append(dim)
         return np.empty(shape, dtype=law_X0.dtype)
 
-    def PX0(self):
+    def PX0(self) -> dists.ProbDist:
         "Law of X_0 at time 0"
         raise NotImplementedError(self._error_msg("PX0"))
 
-    def PX(self, t, xp):
+    def PX(self, t, xp) -> dists.ProbDist:
         "Law of X_t at time t, given X_{t-1} = xp"
         raise NotImplementedError(self._error_msg("PX"))
 
-    def PY(self, t, xp, x):
+    def PY(self, t, xp, x) -> dists.ProbDist:
         """Conditional distribution of Y_t, given the states."""
         raise NotImplementedError(self._error_msg("PY"))
 
-    def proposal0(self, data):
+    def proposal0(self, data) -> dists.ProbDist:
         raise NotImplementedError(self._error_msg("proposal0"))
 
-    def proposal(self, t, xp, data):
+    def proposal(self, t, xp, data) -> dists.ProbDist:
         """Proposal kernel (to be used in a guided or auxiliary filter).
 
         Parameter
@@ -314,8 +319,8 @@ class Bootstrap(particles.FeynmanKac):
         considered state-space model
     """
 
-    def __init__(self, ssm=None, data=None):
-        self.ssm = ssm
+    def __init__(self, ssm: StateSpaceModel | None = None, data: Any | None = None):
+        self.ssm = _require(ssm, "ssm")
         self.data = data
         self.du = self.ssm.PX0().dim
 
@@ -330,7 +335,8 @@ class Bootstrap(particles.FeynmanKac):
         return self.ssm.PX(t, xp).rvs(size=xp.shape[0])
 
     def logG(self, t, xp, x):
-        return self.ssm.PY(t, xp, x).logpdf(self.data[t])
+        data = _require(self.data, "data")
+        return self.ssm.PY(t, xp, x).logpdf(data[t])
 
     def Gamma0(self, u):
         return self.ssm.PX0().ppf(u)
@@ -378,16 +384,17 @@ class GuidedPF(Bootstrap):
         return self.ssm.proposal(t, xp, self.data).rvs(size=xp.shape[0])
 
     def logG(self, t, xp, x):
+        data = _require(self.data, "data")
         if t == 0:
             return (
                 self.ssm.PX0().logpdf(x)
-                + self.ssm.PY(0, xp, x).logpdf(self.data[0])
+                + self.ssm.PY(0, xp, x).logpdf(data[0])
                 - self.ssm.proposal0(self.data).logpdf(x)
             )
         else:
             return (
                 self.ssm.PX(t, xp).logpdf(x)
-                + self.ssm.PY(t, xp, x).logpdf(self.data[t])
+                + self.ssm.PY(t, xp, x).logpdf(data[t])
                 - self.ssm.proposal(t, xp, self.data).logpdf(x)
             )
 
@@ -399,6 +406,9 @@ class GuidedPF(Bootstrap):
 
 
 class APFMixin:
+    ssm: Any
+    data: Any
+
     def logeta(self, t, x):
         return self.ssm.logeta(t, x, self.data)
 
@@ -452,6 +462,9 @@ class StochVol(StateSpaceModel):
         X_t & = \mu + \rho(X_{t-1}-\mu) + \sigma U_t, \quad U_t\sim N(0,1) \\
         Y_t|X_t=x_t & \sim N(0, e^{x_t}) \\
     """
+    mu: ScalarOrArray
+    rho: ScalarOrArray
+    sigma: ScalarOrArray
     default_params = {"mu": -1.02, "rho": 0.9702, "sigma": 0.178}
     # values taken from Pitt & Shephard (1999)
 
@@ -529,6 +542,7 @@ class StochVolLeverage(StochVol):
     for this class.
     """
 
+    phi: ScalarOrArray
     default_params = {"mu": -1.02, "rho": 0.9702, "sigma": 0.178, "phi": 0.0}
 
     def PY(self, t, xp, x):
@@ -553,6 +567,12 @@ class Gordon_etal(StateSpaceModel):
                 + \sigma_X V_t, \quad V_t \sim N(0,1) \\
         Y_t|X_t=x_t         & \sim N(a*x_t^2, 1)
     """
+    a: ScalarOrArray
+    b: ScalarOrArray
+    c: ScalarOrArray
+    d: ScalarOrArray
+    e: ScalarOrArray
+    sigmaX: ScalarOrArray
     default_params = {
         "a": 0.05,
         "b": 0.5,
@@ -580,6 +600,9 @@ class Gordon_etal(StateSpaceModel):
 class BearingsOnly(StateSpaceModel):
     """Bearings-only tracking SSM."""
 
+    sigmaX: ScalarOrArray
+    sigmaY: ScalarOrArray
+    x0: np.ndarray
     default_params = {
         "sigmaX": 2.0e-4,
         "sigmaY": 1e-3,
@@ -616,6 +639,9 @@ class DiscreteCox(StateSpaceModel):
         X_t             & = \mu + \phi(X_{t-1}-\mu) + U_t,   U_t ~ N(0, sigma^2) \\
         X_0             & \sim N(\mu, \sigma^2/(1-\phi**2))
     """
+    mu: ScalarOrArray
+    sigma: ScalarOrArray
+    phi: ScalarOrArray
     default_params = {"mu": 0.0, "sigma": 1.0, "phi": 0.95}
 
     def PX0(self):
@@ -639,6 +665,10 @@ class MVStochVol(StateSpaceModel):
     V_t ~ N(0,corY)
     """
 
+    mu: ScalarOrArray
+    covX: np.ndarray
+    corY: np.ndarray
+    F: np.ndarray
     default_params = {"mu": 0.0, "covX": None, "corY": None, "F": None}  # TODO
 
     def offset(self):
@@ -663,6 +693,11 @@ class ThetaLogistic(StateSpaceModel):
         X_t & = X_{t-1} + \tau_0 - \tau_1 * \exp(\tau_2 * X_{t-1}) + U_t, \quad U_t \sim N(0, \sigma_X^2) \\
         Y_t & \sim X_t + V_t, \quad   V_t \sim N(0, \sigma_Y^2)
     """
+    tau0: ScalarOrArray
+    tau1: ScalarOrArray
+    tau2: ScalarOrArray
+    sigmaX: ScalarOrArray
+    sigmaY: ScalarOrArray
     default_params = {
         "tau0": 0.15,
         "tau1": 0.12,

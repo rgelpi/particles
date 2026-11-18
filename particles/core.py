@@ -94,11 +94,14 @@ See the documentation of `SMC` for more details.
 """
 
 
+from typing import Any, Callable
+
 import numpy as np
 
 from particles import collectors, hilbert
 from particles import resampling as rs
 from particles import rqmc, smoothing, utils
+from particles._typing import _require
 
 err_msg_missing_trans = """
     Feynman-Kac class %s is missing method logpt, which provides the log-pdf
@@ -134,6 +137,10 @@ class FeynmanKac:
     """
 
     # by default, we mutate at every time t
+
+    # Optional capabilities: annotations do not make logeta appear in dir(self).
+    du: int
+    logeta: Callable[..., Any]
 
     def __init__(self, T):
         self.T = T
@@ -189,7 +196,7 @@ class FeynmanKac:
         """
         return rs.wmean_and_var(W, X)
 
-    def summary_format(self, smc):
+    def summary_format(self, smc) -> str:
         return "t=%i: resample:%s, ESS (end of iter)=%.2f" % (
             smc.t,
             smc.rs_flag,
@@ -257,12 +264,12 @@ class SMC:
 
     def __init__(
         self,
-        fk=None,
+        fk: FeynmanKac | None = None,
         N=100,
         qmc=False,
         resampling="systematic",
         ESSrmin=0.5,
-        store_history=False,
+        store_history: smoothing.HistoryOption = False,
         verbose=False,
         collect=None,
     ):
@@ -279,18 +286,21 @@ class SMC:
         self.rs_flag = False  # no resampling at time 0, by construction
         self.logLt = 0.0
         self.wgts = rs.Weights()
-        self.aux = None
-        self.X, self.Xp, self.A = None, None, None
+        self.aux: rs.Weights | None = None
+        # Particle collections can also be ThetaParticles or user-defined types.
+        self.X: Any | None = None
+        self.Xp: Any | None = None
+        self.A: np.ndarray | None = None
 
         # summaries computed at every t
         if collect == "off":
             self.summaries = None
         else:
             self.summaries = collectors.Summaries(collect)
-        self.hist = smoothing.generate_hist_obj(store_history, self)
+        self.hist: smoothing.History = smoothing.generate_hist_obj(store_history, self)
 
     def __str__(self):
-        return self.fk.summary_format(self)
+        return _require(self.fk, "fk").summary_format(self)
 
     @property
     def W(self):
@@ -298,59 +308,69 @@ class SMC:
 
     def reset_weights(self):
         """Reset weights after a resampling step."""
-        if self.fk.isAPF:
-            lw = rs.log_mean_exp(self.logetat, W=self.W) - self.logetat[self.A]
+        fk = _require(self.fk, "fk")
+        if fk.isAPF:
+            A = _require(self.A, "ancestor indices")
+            lw = rs.log_mean_exp(self.logetat, W=self.W) - self.logetat[A]
             self.wgts = rs.Weights(lw=lw)
         else:
             self.wgts = rs.Weights()
 
     def setup_auxiliary_weights(self):
         """Compute auxiliary weights (for APF)."""
-        if self.fk.isAPF:
-            self.logetat = self.fk.logeta(self.t - 1, self.X)
+        fk = _require(self.fk, "fk")
+        if fk.isAPF:
+            self.logetat = fk.logeta(self.t - 1, self.X)
             self.aux = self.wgts.add(self.logetat)
         else:
             self.aux = self.wgts
 
     def generate_particles(self):
+        fk = _require(self.fk, "fk")
         if self.qmc:
-            u = rqmc.sobol(self.N, self.fk.du).squeeze()
+            u = rqmc.sobol(self.N, fk.du).squeeze()
             # squeeze: must be (N,) if du=1
-            self.X = self.fk.Gamma0(u)
+            self.X = fk.Gamma0(u)
         else:
-            self.X = self.fk.M0(self.N)
+            self.X = fk.M0(self.N)
 
     def reweight_particles(self):
-        self.wgts = self.wgts.add(self.fk.logG(self.t, self.Xp, self.X))
+        fk = _require(self.fk, "fk")
+        self.wgts = self.wgts.add(fk.logG(self.t, self.Xp, self.X))
 
     def resample_move(self):
-        self.rs_flag = self.fk.time_to_resample(self)
+        fk = _require(self.fk, "fk")
+        self.rs_flag = fk.time_to_resample(self)
         if self.rs_flag:  # if resampling
-            self.A = rs.resampling(self.resampling, self.aux.W, M=self.N)
+            X = _require(self.X, "particles")
+            aux = _require(self.aux, "auxiliary weights")
+            self.A = rs.resampling(self.resampling, aux.W, M=self.N)
             # we always resample self.N particles, even if smc.X has a
             # different size (example: waste-free)
-            self.Xp = self.X[self.A]
+            self.Xp = X[self.A]
             self.reset_weights()
         else:
             self.A = np.arange(self.N)
             self.Xp = self.X
-        self.X = self.fk.M(self.t, self.Xp)
+        self.X = fk.M(self.t, self.Xp)
 
     def resample_move_qmc(self):
+        fk = _require(self.fk, "fk")
+        X = _require(self.X, "particles")
+        aux = _require(self.aux, "auxiliary weights")
         self.rs_flag = True  # we *always* resample in SQMC
-        u = rqmc.sobol(self.N, self.fk.du + 1)
+        u = rqmc.sobol(self.N, fk.du + 1)
         tau = np.argsort(u[:, 0])
-        self.h_order = hilbert.hilbert_sort(self.X)
-        self.A = self.h_order[rs.inverse_cdf(u[tau, 0], self.aux.W[self.h_order])]
-        self.Xp = self.X[self.A]
+        self.h_order = hilbert.hilbert_sort(X)
+        self.A = self.h_order[rs.inverse_cdf(u[tau, 0], aux.W[self.h_order])]
+        self.Xp = X[self.A]
         v = u[tau, 1:].squeeze()
         #  v is (N,) if du=1, (N,d) otherwise
         self.reset_weights()
-        self.X = self.fk.Gamma(self.t, self.Xp, v)
+        self.X = fk.Gamma(self.t, self.Xp, v)
 
     def compute_summaries(self):
-        if self.t > 0:
-            prec_log_mean_w = self.log_mean_w
+        prec_log_mean_w = self.log_mean_w if self.t > 0 else 0.0
         self.log_mean_w = self.wgts.log_mean
         if self.t == 0 or self.rs_flag:
             self.loglt = self.log_mean_w
@@ -368,7 +388,7 @@ class SMC:
 
     def __next__(self):
         """One step of a particle filter."""
-        if self.fk.done(self):
+        if _require(self.fk, "fk").done(self):
             raise StopIteration
         if self.t == 0:
             self.generate_particles()

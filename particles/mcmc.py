@@ -92,6 +92,8 @@ algorithm, as follows:
 """
 
 
+from typing import Any, cast
+
 import numpy as np
 from scipy import stats
 from scipy.linalg import LinAlgError, cholesky
@@ -100,6 +102,8 @@ import particles
 import particles.state_space_models as ssms
 from particles import smc_samplers as ssp
 from particles import utils
+from particles._typing import _require
+from particles.smoothing import ParticleHistory
 
 
 def msjd(theta):
@@ -127,6 +131,9 @@ class MCMC:
         * `step(self, n)`: n-th step, n>=1
 
     """
+
+    chain: ssp.ThetaParticles
+    nacc: int
 
     def __init__(self, niter=10, verbose=0):
         """
@@ -228,6 +235,10 @@ class GenericRWHM(MCMC):
 
     must be subclassed; the subclass must provide attribute self.prior
     """
+
+    prior: Any
+    theta0: np.ndarray | None
+    adaptive: bool
 
     def __init__(
         self, niter=10, verbose=0, theta0=None, adaptive=True, scale=1.0, rw_cov=None
@@ -421,7 +432,7 @@ class PMMH(GenericRWHM):
         self.prior = prior
         self.data = data
         # do not collect summaries, no need
-        self.smc_options = {"collect": "off"}
+        self.smc_options: dict[str, Any] = {"collect": "off"}
         if smc_options is not None:
             self.smc_options.update(smc_options)
         self.Nx = Nx
@@ -436,8 +447,9 @@ class PMMH(GenericRWHM):
         )
 
     def alg_instance(self, theta):
+        ssm_cls = _require(self.ssm_cls, "ssm_cls")
         return self.smc_cls(
-            fk=self.fk_cls(ssm=self.ssm_cls(**theta), data=self.data),
+            fk=self.fk_cls(ssm=ssm_cls(**theta), data=self.data),
             N=self.Nx,
             **self.smc_options
         )
@@ -467,12 +479,17 @@ class CSMC(particles.SMC):
 
     def generate_particles(self):
         particles.SMC.generate_particles(self)
-        self.X[0] = self.xstar[0]
+        X = _require(self.X, "particles")
+        xstar = _require(self.xstar, "xstar")
+        X[0] = xstar[0]
 
     def resample_move(self):
         particles.SMC.resample_move(self)
-        self.X[0] = self.xstar[self.t]
-        self.A[0] = 0
+        X = _require(self.X, "particles")
+        xstar = _require(self.xstar, "xstar")
+        A = _require(self.A, "ancestor indices")
+        X[0] = xstar[self.t]
+        A[0] = 0
 
 
 #####################################
@@ -489,6 +506,12 @@ class GenericGibbs(MCMC):
 
     """
 
+    prior: Any
+    data: Any
+    theta0: np.ndarray | None
+    store_x: bool
+    ssm_cls: Any
+
     def __init__(
         self,
         niter=10,
@@ -503,6 +526,7 @@ class GenericGibbs(MCMC):
             setattr(self, k, locals()[k])
         theta = np.empty(shape=niter, dtype=self.prior.dtype)
         if store_x:
+            ssm_cls = _require(ssm_cls, "ssm_cls")
             x = ssm_cls.state_container(niter, len(self.data))
             self.chain = ssp.ThetaParticles(theta=theta, x=x)
         else:
@@ -610,10 +634,12 @@ class ParticleGibbs(GenericGibbs):
         else:
             cpf = CSMC(fk=fk, N=self.Nx, xstar=x)
         cpf.run()
+        # SMC and CSMC above both request complete history.
+        hist = cast(ParticleHistory, cpf.hist)
         if self.backward_step:
-            new_x = cpf.hist.backward_sampling_ON2(1)
+            new_x = hist.backward_sampling_ON2(1)
         else:
-            new_x = cpf.hist.extract_one_trajectory()
+            new_x = hist.extract_one_trajectory()
         if self.regenerate_data:
-            self.data = fk.ssm.simulate_given_x(new_x)
+            self.data = _require(fk.ssm, "ssm").simulate_given_x(new_x)
         return new_x

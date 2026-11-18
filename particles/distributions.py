@@ -202,12 +202,16 @@ omit ``ppf`` if you do not plan to use SQMC (Sequentialp quasi Monte Carlo).
 
 
 from collections import OrderedDict  # see prior
+from typing import Any, Callable
 
 import numpy as np
 import numpy.linalg as nla
 import scipy.linalg as sla
 from numpy import random
+from numpy.typing import DTypeLike
 from scipy import special, stats
+
+from particles._typing import ScalarOrArray, _require
 
 HALFLOG2PI = 0.5 * np.log(2.0 * np.pi)
 
@@ -230,7 +234,7 @@ class ProbDist:
     """
 
     dim = 1  # distributions are univariate by default
-    dtype = float  # distributions are continuous by default
+    dtype: DTypeLike = float  # distributions are continuous by default
 
     def shape(self, size):
         if size is None:
@@ -244,7 +248,7 @@ class ProbDist:
     def pdf(self, x):
         return np.exp(self.logpdf(x))
 
-    def rvs(self, size=None):
+    def rvs(self, size: Any=None):
         raise NotImplementedError
 
     def ppf(self, u):
@@ -259,7 +263,7 @@ class ProbDist:
 class LocScaleDist(ProbDist):
     """Base class for location-scale distributions."""
 
-    def __init__(self, loc=0.0, scale=1.0):
+    def __init__(self, loc: ScalarOrArray = 0.0, scale: ScalarOrArray = 1.0):
         self.loc = loc
         self.scale = scale
 
@@ -276,7 +280,7 @@ class Normal(LocScaleDist):
     def ppf(self, u):
         return stats.norm.ppf(u, loc=self.loc, scale=self.scale)
 
-    def posterior(self, x, sigma=1.0):
+    def posterior(self, x, sigma: ScalarOrArray = 1.0):
         """Modelp is X_1,...,X_n ~ N(theta, sigma^2), theta~self, sigma fixed."""
         pr0 = 1.0 / self.scale ** 2  # prior precision
         prd = x.size / sigma ** 2  # data precision
@@ -329,8 +333,8 @@ class Beta(ProbDist):
     def logpdf(self, x):
         return stats.beta.logpdf(x, self.a, self.b)
 
-    def ppf(self, x):
-        return stats.beta.ppf(x, self.a, self.b)
+    def ppf(self, u):
+        return stats.beta.ppf(u, self.a, self.b)
 
 
 class Gamma(ProbDist):
@@ -513,7 +517,7 @@ class TruncNormal(ProbDist):
 class DiscreteDist(ProbDist):
     """Base class for discrete probability distributions.
     """
-    dtype = np.int64
+    dtype: DTypeLike = np.int64
 
 
 class Poisson(DiscreteDist):
@@ -826,12 +830,13 @@ class MixMissing(ProbDist):
     probability.
     """
 
-    def __init__(self, pmiss=0.10, base_dist=None):
+    def __init__(self, pmiss=0.10, base_dist: ProbDist | None = None):
         self.pmiss = pmiss
         self.base_dist = base_dist
 
     def logpdf(self, x):
-        lp = self.base_dist.logpdf(x)
+        base_dist = _require(self.base_dist, "base_dist")
+        lp = base_dist.logpdf(x)
         ina = np.atleast_1d(np.isnan(x))
         if ina.shape[0] == 1:
             ina = np.full_like(lp, ina, dtype=bool)
@@ -840,7 +845,8 @@ class MixMissing(ProbDist):
         return lp
 
     def rvs(self, size=None):
-        x = self.base_dist.rvs(size=size)
+        base_dist = _require(self.base_dist, "base_dist")
+        x = base_dist.rvs(size=size)
         N = x.shape[0]
         is_missing = random.rand(N) < self.pmiss
         x[is_missing, ...] = np.nan
@@ -901,7 +907,8 @@ class MvNormal(ProbDist):
     -----
     The dimension d is determined either by argument ``cov`` (if it is a dxd
     array), or by argument loc (if ``cov`` is not specified). In the latter
-    case, the covariance matrix is set to the identity matrix.
+    case, the covariance matrix is set to the identity matrix. A scalar
+    ``loc`` requires an explicit ``cov`` to determine the dimension.
 
     If ``scale`` is set to ``1.`` (default value), we use the standard
     parametrisation of a Gaussian, with mean ``loc`` and covariance
@@ -928,10 +935,14 @@ class MvNormal(ProbDist):
     matrix for each particle, see `VaryingCovNormal`.
     """
 
-    def __init__(self, loc=0.0, scale=1.0, cov=None):
+    def __init__(
+        self, loc: ScalarOrArray = 0.0, scale: ScalarOrArray = 1.0, cov=None
+    ):
         self.loc = loc
         self.scale = scale
-        self.cov = np.eye(loc.shape[-1]) if cov is None else cov
+        if cov is None and np.ndim(loc) == 0:
+            raise ValueError("MvNormal: specify cov when loc is a scalar")
+        self.cov = np.eye(np.shape(loc)[-1]) if cov is None else cov
         err_msg = "MvNormal: argument cov must be a (d, d) pos. definite matrix"
         try:
             self.L = nla.cholesky(self.cov)  # lower triangle
@@ -1029,7 +1040,7 @@ class VaryingCovNormal(MvNormal):
 
     def __init__(self, loc=0.0, cov=None):
         self.loc = loc
-        self.cov = cov
+        self.cov = _require(cov, "cov")
         err_msg = "VaryingCovNormal: argument cov must be a (N, d, d) array, \
                 with d>1; cov[n, :, :] must be symmetric and positive"
         try:
@@ -1137,12 +1148,12 @@ class Cond(ProbDist):
     documentation of that class for more details.
     """
 
-    def __init__(self, law, dim=1, dtype="float64"):
+    def __init__(self, law: Callable[[Any], ProbDist], dim=1, dtype="float64"):
         self.law = law
         self.dim = dim
         self.dtype = dtype
 
-    def __call__(self, x):
+    def __call__(self, x) -> ProbDist:
         return self.law(x)
 
 
@@ -1184,6 +1195,8 @@ class StructDist(ProbDist):
 
     """
 
+    laws: OrderedDict[str, ProbDist | Cond]
+
     def __init__(self, laws):
         if isinstance(laws, OrderedDict):
             self.laws = laws
@@ -1201,11 +1214,11 @@ class StructDist(ProbDist):
                 typ = (key, law.dtype, law.dim)
             self.dtype.append(typ)
 
-    def logpdf(self, theta):
+    def logpdf(self, x):
         lp = 0.0
         for par, law in self.laws.items():
-            cond_law = law(theta) if callable(law) else law
-            lp += cond_law.logpdf(theta[par])
+            cond_law = law(x) if callable(law) else law
+            lp += cond_law.logpdf(x[par])
         return lp
 
     def rvs(self, size=1):  # Default for size is 1, not None

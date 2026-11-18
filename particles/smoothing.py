@@ -135,8 +135,11 @@ as follows::
 """
 
 
+from __future__ import annotations
+
 import time
 from collections import deque
+from typing import Any, Callable, Literal, Protocol, TypeAlias, cast, overload
 
 import numpy as np
 from numpy import random
@@ -146,9 +149,38 @@ import particles  # worker
 from particles import hilbert
 from particles import resampling as rs
 from particles import rqmc
+from particles._typing import _require
+
+HistoryOption: TypeAlias = bool | int | Callable[[int], bool]
 
 
-def generate_hist_obj(option, smc):
+class _HistorySource(Protocol):
+    fk: Any
+    qmc: bool
+
+
+@overload
+def generate_hist_obj(option: Literal[True], smc: _HistorySource) -> ParticleHistory: ...
+
+
+@overload
+def generate_hist_obj(option: Literal[False], smc: _HistorySource) -> None: ...
+
+
+# bool is an int subtype, so this overload must also allow disabled history.
+@overload
+def generate_hist_obj(
+    option: int, smc: _HistorySource
+) -> RollingParticleHistory | None: ...
+
+
+@overload
+def generate_hist_obj(
+    option: Callable[[int], bool], smc: _HistorySource
+) -> PartialParticleHistory: ...
+
+
+def generate_hist_obj(option: HistoryOption, smc: _HistorySource) -> History:
     if option is True:
         return ParticleHistory(smc.fk, smc.qmc)
     elif option is False:
@@ -260,11 +292,12 @@ class ParticleHistory(RollingParticleHistory):
         is constructed backwards, until time t=0.
         """
         traj = []
-        for t in reversed(range(self.T)):
-            if t == self.T - 1:
-                n = rs.multinomial_once(self.wgts[-1].W)
-            else:
-                n = self.A[t + 1][n]
+        if self.T == 0:
+            return traj
+        n = rs.multinomial_once(self.wgts[-1].W)
+        traj.append(self.X[-1][n])
+        for t in reversed(range(self.T - 1)):
+            n = self.A[t + 1][n]
             traj.append(self.X[t][n])
         return traj[::-1]
 
@@ -516,7 +549,8 @@ class ParticleHistory(RollingParticleHistory):
         ti = self.T - 2 - t  # t+1 in reverse
         if t < 0 or t >= self.T - 1:
             raise ValueError("two-filter smoothing: t must be in range 0,...,T-2")
-        lwinfo = info.hist.wgts[ti].lw - loggamma(info.hist.X[ti])
+        info_hist = _require(info.hist, "information-filter history")
+        lwinfo = info_hist.wgts[ti].lw - loggamma(info_hist.X[ti])
         if linear_cost:
             return self._two_filter_smoothing_ON(
                 t, ti, info, phi, lwinfo, return_ess, modif_forward, modif_info
@@ -529,6 +563,7 @@ class ParticleHistory(RollingParticleHistory):
 
         This method should not be called directly, see two_filter_smoothing.
         """
+        info_hist = _require(info.hist, "information-filter history")
         sp, sw = 0.0, 0.0
         upb = lwinfo.max() + self.wgts[t].lw.max()
         if hasattr(self.fk, "upper_bound_trans"):
@@ -539,9 +574,9 @@ class ParticleHistory(RollingParticleHistory):
                 lwinfo
                 + self.wgts[t].lw[n]
                 - upb
-                + self.fk.logpt(t + 1, self.X[t][n], info.hist.X[ti])
+                + self.fk.logpt(t + 1, self.X[t][n], info_hist.X[ti])
             )
-            sp += np.sum(omegan * phi(self.X[t][n], info.hist.X[ti]))
+            sp += np.sum(omegan * phi(self.X[t][n], info_hist.X[ti]))
             sw += np.sum(omegan)
         return sp / sw
 
@@ -552,6 +587,7 @@ class ParticleHistory(RollingParticleHistory):
 
         This method should not be called directly, see two_filter_smoothing.
         """
+        info_hist = _require(info.hist, "information-filter history")
         if modif_info is not None:
             lwinfo += modif_info
         Winfo = rs.exp_and_normalise(lwinfo)
@@ -562,17 +598,22 @@ class ParticleHistory(RollingParticleHistory):
         else:
             W = self.wgts[t].W
         J = rs.multinomial(W)
-        log_omega = self.fk.logpt(t + 1, self.X[t][J], info.hist.X[ti][I])
+        log_omega = self.fk.logpt(t + 1, self.X[t][J], info_hist.X[ti][I])
         if modif_forward is not None:
             log_omega -= modif_forward[J]
         if modif_info is not None:
             log_omega -= modif_info[I]
         Om = rs.exp_and_normalise(log_omega)
-        est = np.average(phi(self.X[t][J], info.hist.X[ti][I]), axis=0, weights=Om)
+        est = np.average(phi(self.X[t][J], info_hist.X[ti][I]), axis=0, weights=Om)
         if return_ess:
             return (est, 1.0 / np.sum(Om ** 2))
         else:
             return est
+
+
+History: TypeAlias = (
+    ParticleHistory | RollingParticleHistory | PartialParticleHistory | None
+)
 
 
 def smoothing_worker(
@@ -615,57 +656,67 @@ def smoothing_worker(
     original rejection-based FFBS method, where only rejection is used. See Dau
     & Chopin (2022) for a discussion.
     """
+    fk = _require(fk, "fk")
+    method = _require(method, "method")
     T = fk.T
     if fk_info is None:
         fk_info = fk.__class__(ssm=fk.ssm, data=fk.data[::-1])
     est = np.zeros(T - 1)
     if method == "FFBS_QMC":
-        pf = particles.SQMC(fk=fk, N=N, store_history=True)
+        pf = particles.SMC(fk=fk, N=N, store_history=True, qmc=True)
     else:
         pf = particles.SMC(fk=fk, N=N, store_history=True)
     tic = time.perf_counter()
     pf.run()
+    # Both construction branches explicitly request complete history.
+    hist = cast(ParticleHistory, pf.hist)
     if method.startswith("FFBS"):
         submethod = method.split("_")[-1]
         if submethod == "QMC":
-            z = pf.hist.backward_sampling_qmc(N)
+            z = hist.backward_sampling_qmc(N)
         elif submethod == "ON2":
-            z = pf.hist.backward_sampling_ON2(N)
+            z = hist.backward_sampling_ON2(N)
         elif submethod == "MCMC":
-            z = pf.hist.backward_sampling_mcmc(N)
+            z = hist.backward_sampling_mcmc(N)
         elif submethod == "hybrid":
-            z = pf.hist.backward_sampling_reject(N)
+            z = hist.backward_sampling_reject(N)
         elif submethod == "purereject":
-            z = pf.hist.backward_sampling_reject(N, max_trials=N * 10 ** 9)
+            z = hist.backward_sampling_reject(N, max_trials=N * 10 ** 9)
+        else:
+            raise ValueError(f"Unknown FFBS smoothing method: {method}")
         for t in range(T - 1):
-            est[t] = np.mean(add_func(t, z[t], z[t + 1]))
+            phi = _require(add_func, "add_func")
+            est[t] = np.mean(phi(t, z[t], z[t + 1]))
     elif method in ["two-filter_ON2", "two-filter_ON", "two-filter_ON_prop"]:
         infopf = particles.SMC(fk=fk_info, N=N, store_history=True)
         infopf.run()
+        info_hist = cast(ParticleHistory, infopf.hist)
         for t in range(T - 1):
-            psi = lambda x, xf: add_func(t, x, xf)
+            phi = _require(add_func, "add_func")
+            loggamma = _require(log_gamma, "log_gamma")
+            psi = lambda x, xf: phi(t, x, xf)
             if method == "two-filter_ON2":
-                est[t] = pf.hist.two_filter_smoothing(t, infopf, psi, log_gamma)
+                est[t] = hist.two_filter_smoothing(t, infopf, psi, loggamma)
             else:
                 ti = T - 2 - t  # t+1 for info filter
                 if method == "two-filter_ON_prop":
                     modif_fwd = stats.norm.logpdf(
-                        pf.hist.X[t],
-                        loc=np.mean(infopf.hist.X[ti + 1]),
-                        scale=np.std(infopf.hist.X[ti + 1]),
+                        hist.X[t],
+                        loc=np.mean(info_hist.X[ti + 1]),
+                        scale=np.std(info_hist.X[ti + 1]),
                     )
                     modif_info = stats.norm.logpdf(
-                        infopf.hist.X[ti],
-                        loc=np.mean(pf.hist.X[t + 1]),
-                        scale=np.std(pf.hist.X[t + 1]),
+                        info_hist.X[ti],
+                        loc=np.mean(hist.X[t + 1]),
+                        scale=np.std(hist.X[t + 1]),
                     )
                 else:
                     modif_fwd, modif_info = None, None
-                est[t] = pf.hist.two_filter_smoothing(
+                est[t] = hist.two_filter_smoothing(
                     t,
                     infopf,
                     psi,
-                    log_gamma,
+                    loggamma,
                     linear_cost=True,
                     modif_forward=modif_fwd,
                     modif_info=modif_info,

@@ -19,6 +19,8 @@ import gc
 import numpy as np
 from scipy.signal import choose_conv_method, correlate
 
+from particles._typing import Scalar
+
 
 def MCMC_variance(X: np.ndarray, method: str):
     """
@@ -54,7 +56,9 @@ def MCMC_variance_naive(X):
     means = np.mean(X, axis=0)
     return np.var(means) * P
 
-def autocovariance(X: np.ndarray, order: int, mu: float = None, bias=True):
+def autocovariance(
+    X: np.ndarray, order: int, mu: Scalar | None = None, bias=True
+):
     if mu is None:
         mu = np.mean(X)
     X = X - mu
@@ -94,15 +98,14 @@ class AutoCovarianceCalculator:
     """An artificial device to efficiently calculate the autocovariances based
     on (possibly) multiple runs of an MCMC method.
     """
-    def __init__(self, X:np.ndarray, method:str=None, bias=True):
+    def __init__(self, X: np.ndarray, method: str | None = None, bias=True):
         """
         :param X: np array of size `(M,P)`, typically the result of `M` independent MCMC runs of length `P`
         :param method: how will the covariances be calculated. `None` to let things be chosen automatically, otherwise `direct` or `fft` must be specified.
         """
         self.X = X
         self.P, self.M = X.shape
-        # noinspection PyTypeChecker
-        self.mu: float = np.mean(X)
+        self.mu = np.mean(X)
         self.method = method
         self.bias = bias
         self._covariances = np.array([np.nan]*self.P)

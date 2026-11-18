@@ -140,12 +140,14 @@ may be defined as follows::
 
 
 import collections
+from typing import Any
 
 import numpy as np
 from scipy.linalg import solve
 
 from particles import distributions as dists
 from particles import state_space_models as ssms
+from particles._typing import ScalarOrArray, _require
 
 error_msg = "arguments of KalmanFilter.__init__ have inconsistent shapes"
 
@@ -317,7 +319,8 @@ class MVLinearGauss(ssms.StateSpaceModel):
     """
 
     def __init__(self, F=None, G=None, covX=None, covY=None, mu0=None, cov0=None):
-        self.covX, self.covY = np.atleast_2d(covX), np.atleast_2d(covY)
+        self.covX = np.atleast_2d(_require(covX, "covX"))
+        self.covY = np.atleast_2d(_require(covY, "covY"))
         self.dx, self.dy = self.covX.shape[0], self.covY.shape[0]
         self.mu0 = np.zeros(self.dx) if mu0 is None else mu0
         self.cov0 = self.covX if cov0 is None else np.atleast_2d(cov0)
@@ -336,21 +339,21 @@ class MVLinearGauss(ssms.StateSpaceModel):
         assert self.mu0.shape == (self.dx,), error_msg
         assert self.cov0.shape == (self.dx, self.dx), error_msg
 
-    def PX0(self):
+    def PX0(self) -> dists.ProbDist:
         return dists.MvNormal(loc=self.mu0, cov=self.cov0)
 
-    def PX(self, t, xp):
+    def PX(self, t, xp) -> dists.ProbDist:
         return dists.MvNormal(loc=np.dot(xp, self.F.T), cov=self.covX)
 
-    def PY(self, t, xp, x):
+    def PY(self, t, xp, x) -> dists.ProbDist:
         return dists.MvNormal(loc=np.dot(x, self.G.T), cov=self.covY)
 
-    def proposal(self, t, xp, data):
+    def proposal(self, t, xp, data) -> dists.ProbDist:
         pred = MeanAndCov(mean=np.matmul(xp, self.F.T), cov=self.covX)
         f, _ = filter_step_asarray(self.G, self.covY, pred, data[t])
         return dists.MvNormal(loc=f.mean, cov=f.cov)
 
-    def proposal0(self, data):
+    def proposal0(self, data) -> dists.ProbDist:
         pred0 = MeanAndCov(mean=self.mu0, cov=self.cov0)
         f, _ = filter_step(self.G, self.covY, pred0, data[0])
         return dists.MvNormal(loc=f.mean, cov=f.cov)
@@ -408,6 +411,10 @@ class LinearGauss(MVLinearGauss):
         makes the state process invariant:
         :math:`\sigma_X^2 / (1 - \rho^2)`
     """
+    sigmaY: ScalarOrArray
+    rho: ScalarOrArray
+    sigmaX: ScalarOrArray
+    sigma0: ScalarOrArray
     default_params = {"sigmaY": 0.2, "rho": 0.9, "sigmaX": 1.0, "sigma0": None}
 
     def __init__(self, **kwargs):
@@ -463,7 +470,7 @@ class Kalman:
     See the documentation of the module for more details.
     """
 
-    def __init__(self, ssm=None, data=None):
+    def __init__(self, ssm: MVLinearGauss | None = None, data: Any | None = None):
         """
         Parameters
         ----------
@@ -481,15 +488,17 @@ class Kalman:
         return len(self.filt)
 
     def __next__(self):
+        data = _require(self.data, "data")
         try:
-            yt = self.data[self.t]
+            yt = data[self.t]
         except IndexError:
             raise StopIteration
+        ssm = _require(self.ssm, "ssm")
         if not self.pred:
-            self.pred += [MeanAndCov(mean=self.ssm.mu0, cov=self.ssm.cov0)]
+            self.pred += [MeanAndCov(mean=ssm.mu0, cov=ssm.cov0)]
         else:
-            self.pred += [predict_step(self.ssm.F, self.ssm.covX, self.filt[-1])]
-        new_filt, new_logpyt = filter_step(self.ssm.G, self.ssm.covY, self.pred[-1], yt)
+            self.pred += [predict_step(ssm.F, ssm.covX, self.filt[-1])]
+        new_filt, new_logpyt = filter_step(ssm.G, ssm.covY, self.pred[-1], yt)
         self.filt.append(new_filt)
         self.logpyt.append(new_logpyt)
 
@@ -513,5 +522,6 @@ class Kalman:
             self.filter()
         self.smth = [self.filt[-1]]
         for t, f in reversed(list(enumerate(self.filt[:-1]))):
-            self.smth += [smoother_step(self.ssm.F, f, self.pred[t + 1], self.smth[-1])]
+            ssm = _require(self.ssm, "ssm")
+            self.smth += [smoother_step(ssm.F, f, self.pred[t + 1], self.smth[-1])]
         self.smth.reverse()

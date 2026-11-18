@@ -129,6 +129,7 @@ contains a few basic functions to deal with log-weights:
 
 
 import functools
+from typing import Callable, Protocol
 
 import numpy as np
 from numba import jit
@@ -216,7 +217,7 @@ class Weights:
 
     def __init__(self, lw=None):
         self.lw = lw
-        if lw is not None:
+        if self.lw is not None:
             self.lw[np.isnan(self.lw)] = -np.inf
             m = self.lw.max()
             w = np.exp(self.lw - m)
@@ -442,7 +443,11 @@ def wquantiles_str_array(W, x, alphas=(0.25, 0.50, 0, 75)):
 # Resampling schemes
 ####################
 
-rs_funcs = {}  # populated by the decorator below
+class ResamplingScheme(Protocol):
+    def __call__(self, W: np.ndarray, M: int | None = None) -> np.ndarray: ...
+
+
+rs_funcs: dict[str, ResamplingScheme] = {}  # populated by the decorator below
 
 # generic docstring of resampling schemes; assigned by decorator below
 rs_doc = """\
@@ -461,16 +466,16 @@ rs_doc = """\
 """
 
 
-def resampling_scheme(func):
+def resampling_scheme(func: Callable[[np.ndarray, int], np.ndarray]) -> ResamplingScheme:
     """Decorator for resampling schemes."""
 
     @functools.wraps(func)
-    def modif_func(W, M=None):
+    def modif_func(W: np.ndarray, M: int | None = None) -> np.ndarray:
         M = W.shape[0] if M is None else M
         return func(W, M)
 
     rs_funcs[func.__name__] = modif_func
-    modif_func.__doc__ = func.__doc__ + rs_doc
+    modif_func.__doc__ = (func.__doc__ or "") + rs_doc
     return modif_func
 
 
@@ -668,7 +673,8 @@ def ssp(W, M):
             i = k + 2
     # due to round-off error accumulation, we may be missing one particle
     if np.sum(nr_children) == M - 1:
-        last_ij = i if j == k + 2 else j
+        # At loop exit k + 2 == N; N also covers the singleton case.
+        last_ij = i if j == N else j
         if xi[last_ij] > 0.99:
             nr_children[last_ij] += 1
     if np.sum(nr_children) != M:
