@@ -136,8 +136,8 @@ class NestedLogistic(dists.DiscreteDist):
                 if preds: 
                     reg = LogisticRegression(penalty=None)
                     reg.fit(x[:, preds], x[:, i], sample_weight=W)
-                    coeffs[i, i] = reg.intercept_
-                    coeffs[i, preds] = reg.coef_
+                    coeffs[i, i] = reg.intercept_[0] # Old: coeffs[i, i] = reg.intercept_
+                    coeffs[i, preds] = reg.coef_[0] # Old: coeffs[i, preds] = reg.coef_
                 else:
                     coeffs[i, i] = logit(ph[i])
         return cls(coeffs, edgy)
@@ -246,7 +246,7 @@ class BayesianVS(VariableSelection):
         self.prior = prior
         self.nu = nu
         self.lamb = self.sig2_full() if lamb is None else lamb
-        self.iv2 = float(self.lamb / 10.0) if iv2 is None else iv2
+        self.iv2 = np.asarray(self.lamb / 10.0).item() if iv2 is None else iv2 # Old: self.iv2 = float(self.lamb / 10.0) if iv2 is None else iv2
         self.set_constants()
 
     def set_constants(self):

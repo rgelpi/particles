@@ -1051,7 +1051,7 @@ class VaryingCovNormal(MvNormal):
         halflogdetcov = np.sum(np.log(np.diagonal(self.L, axis1=1, axis2=2)), axis=1)
         # not as efficient as triangular_solve, but numpy does not have
         # a "tensor" version of triangular_solve
-        z = nla.solve(self.L, x - self.loc)
+        z = nla.solve(self.L, (x - self.loc)[..., np.newaxis])[..., 0] # Old: z = nla.solve(self.L, x - self.loc)
         norm_cst = self.dim * HALFLOG2PI + halflogdetcov
         return -0.5 * np.sum(z * z, axis=1) - norm_cst
 
